@@ -151,58 +151,68 @@ def renew_via_browser_fetch(page, kind, oid):
 
 def renew_via_dom_click(page, kind, oid):
     """
-    DOM 点击续期 fallback 方案：导航到具体页面，找到续期按钮并点击。
+    DOM 点击续期 fallback：导航到详情页后用原生 JS 查找并点击续期按钮。
+    用 JS 而不是 DrissionPage 选择器，兼容性更好。
     """
-    # 导航到详情页
     detail_path = "{}/{}/{}".format(BASE_URL, "bots" if kind == "Bot" else "sites", oid)
     try:
         page.get(detail_path)
-        time.sleep(3)
+        time.sleep(4)
     except Exception as e:
         return False, 500, "无法访问详情页: {}".format(e)
 
-    # 尝试多种续期按钮选择器
-    selectors = [
-        'text("续期")',
-        'text("延长")',
-        'text("Renew")',
-        'text("Extend")',
-        'text("延長")',
-        'css("[data-action*=renew]")',
-        'css("[data-action*=extend]")',
-        'css("button:has-text(续期)")',
-        'css("button:has-text(延长)")',
-        'css("button:has-text(延長)")',
-    ]
-
-    for sel in selectors:
-        try:
-            btn = page.ele(sel, timeout=2)
-            if btn:
-                btn.click()
-                time.sleep(2)
-                # 检查是否有确认弹窗
-                confirm_selectors = [
-                    'text("确认")',
-                    'text("Confirm")',
-                    'text("OK")',
-                    'css(".ant-btn-primary")',
-                    'css("button.confirm")',
-                ]
-                for cs in confirm_selectors:
-                    try:
-                        conf = page.ele(cs, timeout=1)
-                        if conf:
-                            conf.click()
-                            time.sleep(2)
-                            break
-                    except Exception:
-                        pass
-                return True, 200, "DOM 点击成功"
-        except Exception:
-            continue
-
-    return False, 404, "未找到续期按钮"
+    # 用 JS 找按钮并点击
+    js_click = r"""
+    async () => {
+        const keywords = ['续期', '延长', 'Renew', 'Extend', '延長', 'renew', 'extend'];
+        const allBtns = Array.from(document.querySelectorAll('button, a, [role="button"], .btn, .ant-btn'));
+        
+        // 先找带关键词的按钮
+        let target = allBtns.find(b => {
+            const txt = b.textContent?.trim();
+            return txt && keywords.some(k => txt.includes(k));
+        });
+        
+        // 再找 data-action 包含的
+        if (!target) {
+            target = document.querySelector('[data-action*="renew"], [data-action*="extend"]');
+        }
+        
+        if (!target) {
+            // 把页面上所有按钮文字打印出来方便调试
+            const btnTexts = allBtns.slice(0, 30).map(b => b.textContent?.trim()).filter(Boolean);
+            return { found: false, buttons: btnTexts };
+        }
+        
+        // 点击
+        target.click();
+        await new Promise(r => setTimeout(r, 1500));
+        
+        // 处理确认弹窗
+        await new Promise(r => setTimeout(r, 500));
+        const confirms = ['确认', 'Confirm', 'OK', '确定', '是的'];
+        const confirmBtn = allBtns.find(b => {
+            const txt = b.textContent?.trim();
+            return txt && confirms.some(c => txt.trim() === c);
+        });
+        if (confirmBtn) {
+            confirmBtn.click();
+            await new Promise(r => setTimeout(r, 1500));
+        }
+        
+        return { found: true, clicked: target.textContent?.trim(), confirmClicked: !!confirmBtn };
+    }
+    """
+    
+    try:
+        res = page.run_js(js_click)
+        if isinstance(res, dict) and res.get("found"):
+            return True, 200, "DOM 点击成功: {}".format(res.get("clicked", "?"))
+        else:
+            print("[debug] 页面按钮列表:", res.get("buttons", []) if isinstance(res, dict) else res)
+            return False, 404, "未找到续期按钮，页面上有: {}".format(res.get("buttons", []) if isinstance(res, dict) else "?")
+    except Exception as e:
+        return False, 500, "JS 执行失败: {}".format(e)
 
 
 def _report(level, title, content, details):
